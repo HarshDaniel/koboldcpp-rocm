@@ -6,17 +6,12 @@
 #include <hip/hip_fp16.h>
 #include <hip/hip_bf16.h>
 
-#if defined(GGML_HIP_ROCWMMA_FATTN)
-#include <rocwmma/rocwmma-version.hpp>
-#endif // defined(GGML_HIP_ROCWMMA_FATTN)
-
 // Optional hipBLASLt GEMM backend (opt-in via LLAMA_HIPBLASLT=1 in Makefile).
 // When enabled we use the hipBLASLt group-gemm path for the LLM-sized batched
 // matrices where it outperforms classic hipBLAS on CDNA and newer RDNA GPUs.
 #if defined(GGML_USE_HIPBLASLT)
 #include <hipblaslt/hipblaslt.h>
 #endif // defined(GGML_USE_HIPBLASLT)
-
 #ifdef GGML_USE_NCCL
 #include <rccl/rccl.h>
 #endif // GGML_USE_NCCL
