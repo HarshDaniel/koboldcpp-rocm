@@ -2,10 +2,8 @@
 #include <cstdint>
 
 const int tensor_split_max = 16;
-const int images_max = 8;
-const int audio_max = 4;
-const int logprobs_max = 5;
-const int overridekv_max = 4;
+const int logprobs_max = 10;
+const int overridekv_max = 16;
 
 // match kobold's sampler list and order
 enum samplers
@@ -21,6 +19,7 @@ enum samplers
 };
 enum stop_reason
 {
+    ERROR_ENCOUNTERED=-2,
     INVALID=-1,
     OUT_OF_TOKENS=0,
     EOS_TOKEN_HIT=1,
@@ -37,7 +36,7 @@ struct load_model_inputs
     const int max_context_length = 0;
     const bool low_vram = 0;
     const bool use_mmq = 0;
-    const bool use_rowsplit = 0;
+    const int splitmode = 1;
     const char * executable_path = nullptr;
     const char * model_filename = nullptr;
     const char * lora_filename = nullptr;
@@ -48,16 +47,18 @@ struct load_model_inputs
     const char * mmproj_filename = nullptr;
     const bool mmproj_cpu = false;
     const int visionmaxres = 2048;
+    const int visionmintokens = -1;
+    const int visionmaxtokens = -1;
     const bool use_mmap = false;
     const bool use_mlock = false;
+    const bool use_mtp = false;
     const bool use_smartcontext = false;
     const bool use_contextshift = false;
     const bool use_fastforward = false;
-    const int clblast_info = 0;
-    const int kcpp_main_gpu = 0;
-    const char * vulkan_info = nullptr;
+    const int kcpp_main_gpu = -1;
     const int batchsize = 512;
     const bool autofit = false;
+    const int autofit_tax_mb = 0;
     const int gpulayers = 0;
     const float rope_freq_scale = 1.0f;
     const float rope_freq_base = 10000.0f;
@@ -73,13 +74,20 @@ struct load_model_inputs
     const int quant_k = 0;
     const int quant_v = 0;
     const bool check_slowness = false;
+    const char * jinja_template = nullptr;
     const bool highpriority = false;
-    const bool swa_support = false;
+    const bool prevent_swa = false;
+    const int swa_padding = 0;
     const bool smartcache = false;
+    const int smartcacheslots = 0;
     const bool pipelineparallel = false;
     const float lora_multiplier = 1.0f;
+    const char * devices_override = nullptr;
     const bool quiet = false;
     const int debugmode = 0;
+    const int continuous_batching_slots = 0;
+    const int rpc_mode = 0; //0=disabled, 1=connect, 2=host
+    const char * rpc_targets = nullptr;
 };
 struct generation_inputs
 {
@@ -88,8 +96,10 @@ struct generation_inputs
     const char * memory = nullptr;
     const char * negative_prompt = nullptr;
     const float guidance_scale = 1;
-    const char * images[images_max] = {};
-    const char * audio[audio_max] = {};
+    const int images_len = 0;
+    const char ** images = nullptr;
+    const int audio_len = 0;
+    const char ** audio = nullptr;
     const int max_context_length = 0;
     const int max_length = 0;
     const float temperature = 0.0f;
@@ -122,6 +132,8 @@ struct generation_inputs
     const float dynatemp_exponent = 1.0f;
     const float smoothing_factor = 0.0f;
     const float smoothing_curve = 1.0f;
+    const float adaptive_target = -1.0f;
+    const float adaptive_decay = 0.9f;
     const float dry_multiplier = 0.0f;
     const float dry_base = 0.0f;
     const int dry_allowed_length = 0;
@@ -134,6 +146,7 @@ struct generation_inputs
     const logit_bias * logit_biases = nullptr;
     const int banned_tokens_len = 0;
     const char ** banned_tokens = nullptr;
+    const int reasoning_budget = -1;
 };
 struct generation_outputs
 {
@@ -148,12 +161,20 @@ struct token_count_outputs
     int count = 0;
     int * ids; //we'll just use shared memory for this one, bit of a hack
 };
+struct detokenize_inputs
+{
+    int count = 0;
+    int * ids; //we'll just use shared memory for this one, bit of a hack
+    bool special = false;
+};
 
 struct logprob_item {
     int option_count;
     const char * selected_token;
     float selected_logprob;
+    int32_t selected_token_id;
     const char * tokens[logprobs_max];
+    int32_t token_ids[logprobs_max];
     float * logprobs = nullptr;
 };
 struct last_logprobs_outputs {
@@ -165,15 +186,12 @@ struct sd_load_model_inputs
 {
     const char * model_filename = nullptr;
     const char * executable_path = nullptr;
-    const int clblast_info = 0;
-    const int kcpp_main_gpu = 0;
-    const char * vulkan_info = nullptr;
+    const char * backend = nullptr;
     const int threads = 0;
     const int quant = 0;
     const bool flash_attention = false;
-    const bool offload_cpu = false;
-    const bool vae_cpu = false;
-    const bool clip_cpu = false;
+    const char * params_backend = nullptr;
+    const bool use_mmap = false;
     const bool diffusion_conv_direct = false;
     const bool vae_conv_direct = false;
     const bool taesd = false;
@@ -182,12 +200,20 @@ struct sd_load_model_inputs
     const char * clip1_filename = nullptr;
     const char * clip2_filename = nullptr;
     const char * vae_filename = nullptr;
-    const char * lora_filename = nullptr;
-    const float lora_multiplier = 1.0f;
+    const char * audio_vae_filename = nullptr;
+    const int lora_len = 0;
+    const char ** lora_filenames = nullptr;
+    const float * lora_multipliers = nullptr;
     const int lora_apply_mode = 0;
     const char * photomaker_filename = nullptr;
+    const char * upscaler_filename = nullptr;
     const int img_hard_limit = 0;
     const int img_soft_limit = 0;
+    const char * max_vram = nullptr;
+    const char * split_mode = nullptr;
+    const bool stream_layers = false;
+    const bool auto_fit = false;
+    const char * devices_override = nullptr;
     const bool quiet = false;
     const int debugmode = 0;
 };
@@ -197,28 +223,54 @@ struct sd_generation_inputs
     const char * negative_prompt = nullptr;
     const char * init_images = "";
     const char * mask = "";
+    const char * audio_data = "";
     const int extra_images_len = 0;
     const char ** extra_images = nullptr;
+    const bool reverse_refimg = false;
     const bool flip_mask = false;
     const float denoising_strength = 0.0f;
     const float cfg_scale = 0.0f;
     const float distilled_guidance = -1.0f;
     const int shifted_timestep = 0;
+    const float flow_shift = 0.0f;
     const int sample_steps = 0;
     const int width = 0;
     const int height = 0;
     const int seed = 0;
     const char * sample_method = nullptr;
     const char * scheduler = nullptr;
+    const float eta = -1.0f;
     const int clip_skip = -1;
     const int vid_req_frames = 1;
-    const int vid_req_avi = 0;
+    const int vid_fps = 16;
+    const int video_output_type = 0; //0=gif, 1=avi, 2=both
     const bool remove_limits = false;
+    const bool circular_x = false;
+    const bool circular_y = false;
+    const char * cache_mode = nullptr;
+    const char * cache_options = nullptr;
+    const bool upscale = false;
+    const int lora_len = 0;
+    const char ** lora_filenames = nullptr;
+    const float * lora_multipliers = nullptr;
 };
 struct sd_generation_outputs
 {
     int status = -1;
     int animated = 0;
+    const char * data = "";
+    const char * data_extra = "";
+    const char * final_frame = ""; //for videos to allow extend
+    const char * info = "";
+};
+struct sd_upscale_inputs
+{
+    const char * init_images = "";
+    const int upscaling_resize = 0;
+};
+struct sd_info_outputs
+{
+    int status = -1;
     const char * data = "";
 };
 
@@ -226,9 +278,8 @@ struct whisper_load_model_inputs
 {
     const char * model_filename = nullptr;
     const char * executable_path = nullptr;
-    const int clblast_info = 0;
-    const int kcpp_main_gpu = 0;
-    const char * vulkan_info = nullptr;
+    const int kcpp_main_gpu = -1;
+    const char * devices_override = nullptr;
     const bool quiet = false;
     const int debugmode = 0;
 };
@@ -251,12 +302,11 @@ struct tts_load_model_inputs
     const char * ttc_model_filename = nullptr;
     const char * cts_model_filename = nullptr;
     const char * executable_path = nullptr;
-    const int clblast_info = 0;
-    const int kcpp_main_gpu = 0;
-    const char * vulkan_info = nullptr;
+    const int kcpp_main_gpu = -1;
     const int gpulayers = 0;
     const bool flash_attention = false;
     const int ttsmaxlen = 4096;
+    const char * devices_override = nullptr;
     const bool quiet = false;
     const int debugmode = 0;
 };
@@ -268,6 +318,9 @@ struct tts_generation_inputs
     const char * custom_speaker_voice = "";
     const char * custom_speaker_text = "";
     const char * custom_speaker_data = "";
+    const char * reference_audio = "";
+    const char * speaker_instruction = "";
+    const bool use_mp3 = false;
 };
 struct tts_generation_outputs
 {
@@ -280,13 +333,12 @@ struct embeddings_load_model_inputs
     const int threads = 4;
     const char * model_filename = nullptr;
     const char * executable_path = nullptr;
-    const int clblast_info = 0;
-    const int kcpp_main_gpu = 0;
-    const char * vulkan_info = nullptr;
+    const int kcpp_main_gpu = -1;
     const int gpulayers = 0;
     const bool flash_attention = false;
     const bool use_mmap = false;
     const int embeddingsmaxctx = 0;
+    const char * devices_override = nullptr;
     const bool quiet = false;
     const int debugmode = 0;
 };
@@ -299,6 +351,36 @@ struct embeddings_generation_outputs
 {
     int status = -1;
     int count = 0;
+    const char * data = "";
+};
+
+struct music_load_model_inputs
+{
+    const char * musicllm_filename = nullptr;
+    const char * musicembedding_filename = nullptr;
+    const char * musicdiffusion_filename = nullptr;
+    const char * musicvae_filename = nullptr;
+    const bool lowvram = false;
+    const char * executable_path = nullptr;
+    const int kcpp_main_gpu = -1;
+    const char * devices_override = nullptr;
+    const bool quiet = false;
+    const int debugmode = 0;
+};
+struct music_generation_inputs
+{
+    const bool is_planner_mode = false; //if true, generate codes, else, generate diffusion music
+    const bool stereo = false; //only for wav
+    const bool use_mp3 = false;
+    const bool gen_codes = false;
+    const bool rewrite_caption = true;
+    const char * input_json = nullptr;
+    const char * music_reference_audio_data = nullptr;
+};
+struct music_generation_outputs
+{
+    int status = -1;
+    const char * music_output_json = "";
     const char * data = "";
 };
 
@@ -322,3 +404,13 @@ extern int total_transcribe_gens;
 extern int last_draft_success;
 extern int last_draft_failed;
 extern stop_reason last_stop_reason;
+
+bool gpttype_batch_generate_enabled();
+int gpttype_batch_generate_submit(const generation_inputs inputs);
+bool gpttype_batch_generate_has_finished(int request_id);
+int gpttype_batch_generate_stream_count(int request_id);
+const char * gpttype_batch_generate_new_token(int request_id, int idx);
+const char * gpttype_batch_generate_pending_output(int request_id);
+generation_outputs gpttype_batch_generate_result(int request_id);
+bool gpttype_batch_generate_abort(int request_id);
+void gpttype_batch_generate_release(int request_id);

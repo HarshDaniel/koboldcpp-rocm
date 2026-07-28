@@ -10,6 +10,9 @@
 #include <codecvt>
 #include <sstream>
 #include <ctime>
+#include <thread>
+#include <atomic>
+#include <algorithm>
 
 #define MINIAUDIO_IMPLEMENTATION
 #ifndef MTMD_AUDIO_DEBUG
@@ -22,6 +25,8 @@
 #define MA_NO_GENERATION
 // #define MA_API static
 #include "miniaudio/miniaudio.h"
+
+#include "acestep/mp3/mp3enc.h"
 
 void utreplace(std::string & str, const std::string & needle, const std::string & replacement) {
     size_t pos = 0;
@@ -366,27 +371,481 @@ std::vector<std::vector<int>> split_big_vector(const std::vector<int>& big_arr, 
     return small_arrs;
 }
 
-std::vector<float> resample_wav(const std::vector<float>& input, uint32_t input_rate, uint32_t output_rate) {
+std::vector<std::vector<int>> split_big_vector_in_two(const std::vector<int>& big_arr, size_t chunk_size)
+{
+    std::vector<std::vector<int>> result;
+    if (chunk_size == 0 || big_arr.empty())
+        return result;
 
-    size_t input_size = input.size();
+    if (big_arr.size() <= chunk_size) {
+        // Only one chunk (all elements)
+        result.emplace_back(big_arr);
+        return result;
+    }
+    size_t split_point = big_arr.size() - chunk_size;
+    result.emplace_back(big_arr.begin(), big_arr.begin() + split_point);  // First big chunk
+    result.emplace_back(big_arr.begin() + split_point, big_arr.end()); // Last chunk (size <= chunk_size)
+    return result;
+}
 
-    double ratio = static_cast<double>(output_rate) / input_rate;
-    size_t newLength = static_cast<size_t>(input.size() * ratio);
-    std::vector<float> output(newLength);
+static double audio_resample_bessel_i0(double x) {
+    double sum  = 1.0;
+    double term = 1.0;
+    double y    = x * x * 0.25;
+    for (int k = 1; k < 30; k++) {
+        term *= y / ((double) k * (double) k);
+        sum += term;
+        if (term < sum * 1e-15) {
+            break;
+        }
+    }
+    return sum;
+}
 
-    // Perform simple linear interpolation resampling
-    for (size_t i = 0; i < newLength; ++i) {
-        double srcIndex = i / ratio;
-        size_t srcIndexInt = static_cast<size_t>(srcIndex);
-        double frac = srcIndex - srcIndexInt;
-        if (srcIndexInt + 1 < input_size) {
-            output[i] = static_cast<float>(input[srcIndexInt] * (1 - frac) + input[srcIndexInt + 1] * frac);
-        } else {
-            output[i] = input[srcIndexInt];
+std::vector<float> resample_wav(int num_channels,const std::vector<float>& input,uint32_t input_rate,uint32_t output_rate)
+{
+    if (input.empty() || num_channels <= 0 || input_rate == 0 || output_rate == 0)
+        return {};
+
+    if (input.size() % num_channels != 0)
+        return {};
+
+    const int n_in = input.size() / num_channels;
+
+    if (input_rate == output_rate)
+        return input;
+
+    const double ratio = (double)output_rate / (double)input_rate;
+    const int n_out = (int)std::lround(n_in * ratio);
+
+    std::vector<float> output((size_t)n_out * num_channels);
+
+    const int half_len = 32;
+    const int taps = half_len * 2;
+
+    const double beta = 9.0;
+
+    const double inv_i0b = 1.0 / audio_resample_bessel_i0(beta);
+    const double fc = 0.5 * ((ratio < 1.0) ? ratio : 1.0);
+
+    // PRECOMPUTE KAISER WINDOW
+    std::vector<double> window(taps + 1);
+
+    for (int k = -half_len; k <= half_len; k++)
+    {
+        double t = (double)k / (double)half_len;
+
+        double win;
+
+        if (t < -1.0 || t > 1.0)
+            win = 0.0;
+        else
+            win = audio_resample_bessel_i0(beta * std::sqrt(1.0 - t * t)) * inv_i0b;
+
+        window[k + half_len] = win;
+    }
+
+    for (int ch = 0; ch < num_channels; ch++)
+    {
+        const float* src = input.data() + ch * n_in;
+        float* dst = output.data() + ch * n_out;
+
+        for (int i = 0; i < n_out; i++)
+        {
+            double center = (double)i / ratio;
+
+            int base = (int)std::floor(center);
+
+            int start = base - half_len + 1;
+            int end   = base + half_len;
+
+            double sum = 0.0;
+            double wgt = 0.0;
+
+            for (int j = start; j <= end; j++)
+            {
+                double d = center - (double)j;
+
+                double sinc_val;
+
+                if (std::fabs(d) < 1e-9)
+                    sinc_val = 2.0 * fc;
+                else
+                    sinc_val = std::sin(2.0 * M_PI * fc * d) / (M_PI * d);
+
+                double win = window[j - start];
+
+                double h = sinc_val * win;
+
+                int idx = j;
+
+                if (idx < 0) idx = 0;
+                if (idx >= n_in) idx = n_in - 1;
+
+                sum += src[idx] * h;
+                wgt += h;
+            }
+
+            dst[i] = (wgt > 1e-12) ? (float)(sum / wgt) : 0.0f;
         }
     }
 
     return output;
+}
+
+std::vector<float> mix_planar_stereo_to_mono(const float* audio, int T_audio)
+{
+    std::vector<float> mono(T_audio);
+    const float* left  = audio;
+    const float* right = audio + T_audio;
+    for (int t = 0; t < T_audio; ++t)
+    {
+        mono[t] = 0.5f * (left[t] + right[t]);
+    }
+    return mono;
+}
+
+static uint8_t linear_to_mulaw(int16_t sample)
+{
+    const int16_t BIAS = 0x84;        // 132
+    const int16_t CLIP = 32635;
+
+    int16_t sign = (sample >> 8) & 0x80;
+    if (sign)
+        sample = -sample;
+
+    if (sample > CLIP)
+        sample = CLIP;
+
+    sample += BIAS;
+
+    int16_t exponent = 7;
+    for (int16_t expMask = 0x4000;
+         (sample & expMask) == 0 && exponent > 0;
+         exponent--, expMask >>= 1);
+
+    int16_t mantissa = (sample >> (exponent + 3)) & 0x0F;
+
+    uint8_t ulaw = ~(sign | (exponent << 4) | mantissa);
+    return ulaw;
+}
+
+std::string save_ulaw_wav8_base64(const std::vector<float> &data, int sample_rate)
+{
+    std::ostringstream oss;
+    wav_ulaw_header header;
+
+    header.sample_rate = sample_rate;
+    header.byte_rate   = sample_rate;      // 1 byte per sample (mono)
+    header.block_align = 1;
+    header.data_size   = static_cast<uint32_t>(data.size());
+    header.chunk_size  = 4                       // "WAVE"
+                       + 8 + header.fmt_chunk_size
+                       + 8 + header.data_size;
+
+    // Write header
+    oss.write(reinterpret_cast<const char*>(&header), sizeof(header));
+
+    // Convert and write samples
+    for (float s : data)
+    {
+        float clamped = std::clamp(s, -1.0f, 1.0f);
+        int16_t pcm = static_cast<int16_t>(clamped * 32767.0f);
+        uint8_t mu = linear_to_mulaw(pcm);
+        oss.write(reinterpret_cast<const char*>(&mu), 1);
+    }
+
+    std::string wav_data = oss.str();
+    return kcpp_base64_encode(wav_data);
+}
+
+std::string save_wav16_base64(const std::vector<float> &data, int sample_rate) {
+    std::ostringstream oss;
+    wav16_header header;
+
+    // Fill header fields
+    header.sample_rate = sample_rate;
+    header.byte_rate = header.sample_rate * header.num_channels * (header.bits_per_sample / 8);
+    header.block_align = header.num_channels * (header.bits_per_sample / 8);
+    header.data_size = data.size() * (header.bits_per_sample / 8);
+    header.chunk_size = 36 + header.data_size;
+
+    // Write header
+    oss.write(reinterpret_cast<const char*>(&header), sizeof(header));
+
+    // Write samples
+    for (const auto &sample : data) {
+        int16_t pcm_sample = static_cast<int16_t>(std::clamp(sample * 32767.0, -32768.0, 32767.0));
+        oss.write(reinterpret_cast<const char*>(&pcm_sample), sizeof(pcm_sample));
+    }
+
+    // Get binary WAV data
+    std::string wav_data = oss.str();
+    return kcpp_base64_encode(wav_data); //return as base64 string
+}
+
+//assumes planar stereo input from acestep
+std::string save_stereo_wav16_base64(const std::vector<float> & raw_audio, int T_audio, int sample_rate) {
+    std::ostringstream oss(std::ios::binary);
+    const int n_channels = 2;
+    const int bits = 16;
+    const int byte_rate = sample_rate * n_channels * (bits / 8);
+    const int block_align = n_channels * (bits / 8);
+    const int data_size = T_audio * n_channels * (bits / 8);
+    const int file_size = 36 + data_size;
+    oss.write("RIFF", 4);
+    oss.write(reinterpret_cast<const char*>(&file_size), 4);
+    oss.write("WAVE", 4);
+    oss.write("fmt ", 4);
+    int32_t fmt_size = 16;
+    oss.write(reinterpret_cast<const char*>(&fmt_size), 4);
+    int16_t audio_fmt = 1; // PCM
+    oss.write(reinterpret_cast<const char*>(&audio_fmt), 2);
+    int16_t nc = n_channels;
+    oss.write(reinterpret_cast<const char*>(&nc), 2);
+    oss.write(reinterpret_cast<const char*>(&sample_rate), 4);
+    oss.write(reinterpret_cast<const char*>(&byte_rate), 4);
+    int16_t ba = block_align;
+    oss.write(reinterpret_cast<const char*>(&ba), 2);
+    int16_t bp = bits;
+    oss.write(reinterpret_cast<const char*>(&bp), 2);
+    oss.write("data", 4);
+    oss.write(reinterpret_cast<const char*>(&data_size), 4);
+
+    // EXPECTS PLANAR INPUT:
+    // raw_audio[0 ... T_audio-1]           = Left
+    // raw_audio[T_audio ... 2*T_audio-1]   = Right
+    for (int t = 0; t < T_audio; ++t) {
+        for (int c = 0; c < 2; ++c) {
+            float s = raw_audio[c * T_audio + t];
+            s = std::max(-1.0f, std::min(1.0f, s));  // clamp to [-1, 1]
+            int16_t v = static_cast<int16_t>(s * 32767.0f);
+            oss.write(reinterpret_cast<const char*>(&v), 2);
+        }
+    }
+    std::string wav_data = oss.str();
+    return kcpp_base64_encode(wav_data);
+}
+
+std::string save_mono_mp3_base64(const std::vector<float> & raw_audio, int sample_rate) {
+    std::vector<float> limited_audio = raw_audio;
+    float peak = 0.0f;
+    for (float s : limited_audio) {
+        peak = std::max(peak, std::fabs(s));
+    }
+    if (peak > 1e-6f) {
+        const float target_amp = 0.89125094f; // -1.0 dBFS
+        const float gain = peak > target_amp ? target_amp / peak : 1.0f;
+        for (float & s : limited_audio) {
+            s = std::max(-target_amp, std::min(target_amp, s * gain));
+        }
+    }
+
+    const float * enc_audio = limited_audio.data();
+    int enc_T  = (int) limited_audio.size();
+    int enc_sr = sample_rate;
+    std::vector<float> resampled;
+
+    if (sample_rate != 32000 && sample_rate != 44100 && sample_rate != 48000) {
+        resampled = resample_wav(1, limited_audio, sample_rate, 44100);
+        enc_audio = resampled.data();
+        enc_sr    = 44100;
+        enc_T     = (int) resampled.size();
+    }
+
+    if (enc_T <= 0) {
+        return "";
+    }
+
+    mp3enc_t * enc = mp3enc_init(enc_sr, 1, 128);
+    if (!enc) {
+        fprintf(stderr, "[Audio] mp3enc_init failed\n");
+        return "";
+    }
+
+    std::string mp3_data;
+    mp3_data.reserve(enc_T / 4);
+    int chunk_size = enc_sr;
+    std::vector<float> buf((size_t) chunk_size);
+
+    for (int pos = 0; pos < enc_T; pos += chunk_size) {
+        int n = (pos + chunk_size <= enc_T) ? chunk_size : (enc_T - pos);
+        memcpy(buf.data(), enc_audio + pos, (size_t) n * sizeof(float));
+        int out_size = 0;
+        const uint8_t * mp3 = mp3enc_encode(enc, buf.data(), n, &out_size);
+        if (out_size > 0) {
+            mp3_data.append((const char *) mp3, out_size);
+        }
+    }
+
+    int flush_size = 0;
+    const uint8_t * flush_data = mp3enc_flush(enc, &flush_size);
+    if (flush_size > 0) {
+        mp3_data.append((const char *) flush_data, flush_size);
+    }
+    mp3enc_free(enc);
+    return kcpp_base64_encode(mp3_data);
+}
+
+std::string save_stereo_mp3_base64(const std::vector<float> & raw_audio,int T_audio,int sample_rate) {
+    const float * enc_audio = raw_audio.data();
+    int enc_T  = T_audio;
+    int enc_sr = sample_rate;
+    std::vector<float> resampled;
+
+    // resample to 44100 if sr is not a valid MPEG1 rate
+    if (sample_rate != 32000 && sample_rate != 44100 && sample_rate != 48000) {
+        resampled = resample_wav(2,raw_audio,sample_rate,44100);
+        enc_audio = resampled.data();
+        enc_sr    = 44100;
+        enc_T     = (int)resampled.size() / 2;
+    }
+
+    const int kbps = 192;
+
+    // Encode PCM [offset, offset+len) with optional warm-up.
+    // warmup=true primes filterbank/MDCT/psy with the 1152 PCM samples
+    // immediately preceding offset (caller guarantees offset >= 1152).
+    // Returns raw MP3 bytes, or empty string on init failure.
+    auto encode_chunk = [&](int offset, int len, bool warmup) -> std::string {
+        mp3enc_t * enc = mp3enc_init(enc_sr, 2, kbps);
+        if (!enc) return "";
+
+        if (warmup) {
+            int wo = offset - 1152;
+            float wb[1152 * 2];
+            memcpy(wb,          enc_audio + wo,        1152 * sizeof(float));
+            memcpy(wb + 1152,   enc_audio + enc_T + wo, 1152 * sizeof(float));
+            int dummy = 0;
+            mp3enc_encode(enc, wb, 1152, &dummy);
+            mp3enc_flush(enc, &dummy);
+        }
+
+        std::string result;
+        result.reserve(len / 4);
+
+        int chunk_size = enc_sr;
+        std::vector<float> buf((size_t)chunk_size * 2);
+
+        for (int pos = 0; pos < len; pos += chunk_size) {
+            int n = (pos + chunk_size <= len) ? chunk_size : (len - pos);
+            memcpy(buf.data(),     enc_audio + offset + pos,          (size_t)n * sizeof(float));
+            memcpy(buf.data() + n, enc_audio + enc_T + offset + pos,  (size_t)n * sizeof(float));
+            int out_size = 0;
+            const uint8_t * mp3 = mp3enc_encode(enc, buf.data(), n, &out_size);
+            if (out_size > 0) {
+                result.append((const char *) mp3, out_size);
+            }
+        }
+
+        int flush_size = 0;
+        const uint8_t * flush_data = mp3enc_flush(enc, &flush_size);
+        if (flush_size > 0) {
+            result.append((const char *) flush_data, flush_size);
+        }
+        mp3enc_free(enc);
+        return result;
+    };
+
+    // Determine thread count: at most 1 thread per ~0.5s of audio
+    int n_threads = std::max(1, (int)std::thread::hardware_concurrency());
+    int min_chunk = enc_sr / 2;
+    if (n_threads * min_chunk > enc_T) {
+        n_threads = std::max(1, enc_T / min_chunk);
+    }
+
+    // Single-threaded path — call encode_chunk directly
+    if (n_threads <= 1) {
+        std::string mp3_data = encode_chunk(0, enc_T, false);
+        if (mp3_data.empty()) {
+            fprintf(stderr, "[Audio] mp3enc_init failed\n");
+            return "";
+        }
+        return kcpp_base64_encode(mp3_data);
+    }
+
+    // Multi-threaded path: partition audio, encode chunks in parallel
+    struct Chunk { int offset; int n_samples; };
+    std::vector<Chunk> chunks(n_threads);
+    {
+        constexpr int FRAME = 1152;
+
+        int pos = 0;
+
+        for (int i = 0; i < n_threads; i++) {
+            // Compute ideal boundaries
+            int start = (int)(((int64_t)enc_T * i) / n_threads);
+            int end   = (int)(((int64_t)enc_T * (i + 1)) / n_threads);
+
+            // Align internal boundaries down to frame boundaries
+            if (i != 0) {
+                start = (start / FRAME) * FRAME;
+            }
+            if (i != n_threads - 1) {
+                end = (end / FRAME) * FRAME;
+            }
+
+            // Enforce monotonicity
+            if (start < pos) {
+                start = pos;
+            }
+            if (end < start) {
+                end = start;
+            }
+
+            chunks[i].offset    = start;
+            chunks[i].n_samples = end - start;
+
+            pos = end;
+        }
+
+        // Ensure final chunk reaches exact end
+        if (!chunks.empty()) {
+            chunks.back().n_samples = enc_T - chunks.back().offset;
+        }
+    }
+
+    std::vector<std::string> results(n_threads);
+    std::vector<std::thread> threads;
+    std::atomic<int> init_failures{0};
+
+    // RAII guard: join all threads on any exception
+    struct ThreadGuard {
+        std::vector<std::thread> & t;
+        ~ThreadGuard() { for (auto & th : t) if (th.joinable()) th.join(); }
+    } guard{threads};
+
+    for (int i = 0; i < n_threads; i++) {
+        threads.emplace_back([&, i]() {
+            if (chunks[i].n_samples <= 0) return;
+
+            // Chunk 0 starts fresh; chunks 1..N-1 get warm-up from prior chunk
+            bool warmup = (i > 0);
+            std::string r = encode_chunk(chunks[i].offset, chunks[i].n_samples, warmup);
+            if (r.empty()) {
+                init_failures.fetch_add(1, std::memory_order_relaxed);
+            } else {
+                results[i] = std::move(r);
+            }
+        });
+    }
+
+    for (auto & t : threads) {
+        t.join();
+    }
+
+    if (init_failures.load(std::memory_order_relaxed) > 0) {
+        fprintf(stderr, "[Audio] mp3enc_init failed for %d chunk(s)\n", init_failures.load());
+        return "";
+    }
+
+    std::string mp3_data;
+    size_t total_size = 0;
+    for (auto & r : results) total_size += r.size();
+    mp3_data.reserve(total_size);
+    for (auto & r : results) mp3_data.append(r);
+
+    return kcpp_base64_encode(mp3_data);
 }
 
 //a very rudimentary all in one sampling function which has no dependencies
@@ -477,167 +936,6 @@ int32_t kcpp_quick_sample(float * logits, const int n_logits, const std::vector<
     return logits_id[idx].second;
 }
 
-void kcpp_embd_batch::init_kcpp_batch(int32_t n_tokens,
-                                      int32_t npast,
-                                      bool    use_mrope,
-                                      bool    return_all_logits,
-                                      bool    mrope_is_image,
-                                      int     img_nx,
-                                      int     img_ny) {
-    const int          n_pos_per_embd = use_mrope ? 4 : 1;
-    const llama_seq_id seq_id         = 0;
-
-    if (use_mrope && mrope_is_image) {
-        GGML_ASSERT(img_nx > 0 && img_ny > 0);
-        GGML_ASSERT(img_nx * img_ny == n_tokens);
-    }
-
-    pos.resize(n_tokens * n_pos_per_embd);
-    std::fill(pos.begin(), pos.end(), 0);
-
-    n_seq_id.resize(n_tokens);
-    seq_ids.resize(n_tokens + 1);
-    logits.resize(n_tokens);
-    seq_id_0.resize(1);
-
-    seq_id_0[0]       = seq_id;
-    seq_ids[n_tokens] = nullptr;
-
-    batch.pos      = pos.data();
-    batch.n_seq_id = n_seq_id.data();
-    batch.seq_id   = seq_ids.data();
-    batch.logits   = logits.data();
-
-    for (int i = 0; i < n_tokens; ++i) {
-        n_seq_id[i] = 1;
-        seq_ids[i]  = seq_id_0.data();
-        logits[i]   = return_all_logits;
-    }
-
-    // ---- position encoding ----
-    if (!use_mrope) {
-        for (int i = 0; i < n_tokens; ++i) {
-            pos[i] = npast + i;
-        }
-    } else if (!mrope_is_image) {
-        // 1D M-RoPE (audio / embedding stream)
-        for (int i = 0; i < n_tokens; ++i) {
-            pos[i + 0 * n_tokens] = npast + i;
-            pos[i + 1 * n_tokens] = npast + i;
-            pos[i + 2 * n_tokens] = npast + i;
-            pos[i + 3 * n_tokens] = 0;
-        }
-    } else {
-        // 2D image M-RoPE
-        int idx = 0;
-        for (int y = 0; y < img_ny; ++y) {
-            for (int x = 0; x < img_nx; ++x) {
-                pos[idx + 0 * n_tokens] = npast;
-                pos[idx + 1 * n_tokens] = npast + y;
-                pos[idx + 2 * n_tokens] = npast + x;
-                pos[idx + 3 * n_tokens] = 0;
-                ++idx;
-            }
-        }
-    }
-
-    // Always request logits for last token
-    logits[n_tokens - 1] = true;
-}
-
-//for embeddings
-kcpp_embd_batch::kcpp_embd_batch(float * embd,
-                                 int32_t n_tokens,
-                                 int32_t npast,
-                                 bool    use_mrope,
-                                 bool    mrope_is_image,
-                                 int     img_nx,
-                                 int     img_ny) {
-    batch = {
-        /* n_tokens = */ n_tokens,
-        /* tokens   = */ nullptr,
-        /* embd     = */ embd,
-        /* pos      = */ nullptr,
-        /* n_seq_id = */ nullptr,
-        /* seq_id   = */ nullptr,
-        /* logits   = */ nullptr,
-    };
-
-    init_kcpp_batch(n_tokens, npast, use_mrope,
-                    /*return_all_logits=*/false, mrope_is_image, img_nx, img_ny);
-}
-
-// for tokens
-kcpp_embd_batch::kcpp_embd_batch(std::vector<llama_token> & tokens,
-                                 int32_t                    npast,
-                                 bool                       use_mrope,
-                                 bool                       return_all_logits,
-                                 bool                       mrope_is_image,
-                                 int                        img_nx,
-                                 int                        img_ny) {
-    batch = {
-        /* n_tokens = */ (int32_t) tokens.size(),
-        /* tokens   = */ tokens.data(),
-        /* embd     = */ nullptr,
-        /* pos      = */ nullptr,
-        /* n_seq_id = */ nullptr,
-        /* seq_id   = */ nullptr,
-        /* logits   = */ nullptr,
-    };
-
-    init_kcpp_batch(batch.n_tokens, npast, use_mrope, return_all_logits, mrope_is_image, img_nx, img_ny);
-}
-
-llama_batch kcpp_embd_batch::get_view(int offset, int n_tokens, int n_embd_mmproj) {
-    GGML_ASSERT(offset >= 0);
-    GGML_ASSERT(n_tokens > 0);
-    GGML_ASSERT(offset + n_tokens <= batch.n_tokens);
-
-    const int total_tokens = batch.n_tokens;
-    llama_pos * pos_ptr = nullptr;
-
-    // Detect M-RoPE vs normal RoPE
-    const bool is_mrope = (pos.size() > (size_t)total_tokens);
-
-    pos_view.clear();
-
-    if (is_mrope) {
-        const int n_pos_per_embd = pos.size() / total_tokens;
-        GGML_ASSERT(n_pos_per_embd == 4);
-
-        // Layout:
-        // src: [dim0_all_tokens][dim1_all_tokens][dim2_all_tokens][dim3_all_tokens]
-        // dst: same layout, but only [offset : offset + n_tokens]
-        pos_view.reserve(n_tokens * n_pos_per_embd);
-
-        for (int dim = 0; dim < n_pos_per_embd; ++dim) {
-            const llama_pos * src =
-                pos.data() + dim * total_tokens + offset;
-
-            pos_view.insert(
-                pos_view.end(),
-                src,
-                src + n_tokens
-            );
-        }
-
-        pos_ptr = pos_view.data();
-    }
-    else {
-        // Normal RoPE: contiguous slice
-        pos_ptr = pos.data() + offset;
-    }
-
-    return {
-        /* n_tokens = */ n_tokens,
-        /* tokens   = */ nullptr,
-        /* embd     = */ batch.embd ? batch.embd + offset*n_embd_mmproj : nullptr,
-        /* pos      = */ pos_ptr,
-        /* n_seq_id = */ batch.n_seq_id + offset,
-        /* seq_id   = */ batch.seq_id   + offset,
-        /* logits   = */ batch.logits   + offset,
-    };
-}
 
 std::vector<std::string> split_string(const std::string& input, const std::string& separator) {
     std::vector<std::string> result;
@@ -708,5 +1006,191 @@ bool kcpp_decode_audio_from_buf(const unsigned char * buf_in, size_t len, int ta
     }
 
     ma_decoder_uninit(&decoder);
+    return true;
+}
+
+bool kcpp_decode_audio_file_from_buf(const unsigned char * buf_in, size_t len, int & sample_rate, int & channels, std::vector<float> & pcmf32_interleaved) {
+    sample_rate = 0;
+    channels = 0;
+    pcmf32_interleaved.clear();
+
+    if (!buf_is_audio_file((const char *)buf_in, len))
+    {
+        return false;
+    }
+
+    ma_result result;
+    ma_decoder_config decoder_config = ma_decoder_config_init(ma_format_f32, 0, 0);
+    ma_decoder decoder;
+
+    result = ma_decoder_init_memory(buf_in, len, &decoder_config, &decoder);
+    if (result != MA_SUCCESS) {
+        return false;
+    }
+
+    ma_uint32 decoded_channels = 0;
+    ma_uint32 decoded_sample_rate = 0;
+    result = ma_decoder_get_data_format(&decoder, nullptr, &decoded_channels, &decoded_sample_rate, nullptr, 0);
+    if (result != MA_SUCCESS || decoded_channels == 0 || decoded_sample_rate == 0) {
+        ma_decoder_uninit(&decoder);
+        return false;
+    }
+
+    ma_uint64 frame_count;
+    ma_uint64 frames_read;
+    result = ma_decoder_get_length_in_pcm_frames(&decoder, &frame_count);
+    if (result != MA_SUCCESS) {
+        ma_decoder_uninit(&decoder);
+        return false;
+    }
+
+    pcmf32_interleaved.resize(static_cast<size_t>(frame_count) * static_cast<size_t>(decoded_channels));
+    result = ma_decoder_read_pcm_frames(&decoder, pcmf32_interleaved.data(), frame_count, &frames_read);
+    ma_decoder_uninit(&decoder);
+    if (result != MA_SUCCESS) {
+        pcmf32_interleaved.clear();
+        return false;
+    }
+
+    pcmf32_interleaved.resize(static_cast<size_t>(frames_read) * static_cast<size_t>(decoded_channels));
+    sample_rate = static_cast<int>(decoded_sample_rate);
+    channels = static_cast<int>(decoded_channels);
+    return !pcmf32_interleaved.empty();
+}
+
+//this version is specifically required for ace-step
+bool kcpp_decode_audio_to_f32_stereo_48k(const uint8_t * data, size_t data_size, std::vector<float> & pcm, int & T_audio) {
+    ma_result result;
+
+    // Force the exact format expected by the VAE
+    ma_decoder_config config =
+        ma_decoder_config_init(ma_format_f32, 2, 48000);
+
+    ma_decoder decoder;
+
+    result = ma_decoder_init_memory(data, data_size, &config, &decoder);
+    if (result != MA_SUCCESS)
+        return false;
+
+    ma_uint64 frame_count = 0;
+
+    result = ma_decoder_get_length_in_pcm_frames(&decoder, &frame_count);
+    if (result != MA_SUCCESS) {
+        ma_decoder_uninit(&decoder);
+        return false;
+    }
+
+    // allocate stereo
+    pcm.resize(frame_count * 2);
+
+    ma_uint64 frames_read = 0;
+
+    result = ma_decoder_read_pcm_frames(
+        &decoder,
+        pcm.data(),
+        frame_count,
+        &frames_read
+    );
+
+    ma_decoder_uninit(&decoder);
+
+    if (result != MA_SUCCESS)
+        return false;
+
+    pcm.resize(frames_read * 2);
+    T_audio = (int)frames_read;
+
+    return true;
+}
+
+static std::vector<std::string> kcpp_string_split(const std::string & input, char separator)
+{
+    std::vector<std::string> parts;
+    size_t begin_pos = 0;
+    size_t separator_pos = input.find(separator);
+    while (separator_pos != std::string::npos) {
+        std::string part = input.substr(begin_pos, separator_pos - begin_pos);
+        parts.emplace_back(part);
+        begin_pos = separator_pos + 1;
+        separator_pos = input.find(separator, begin_pos);
+    }
+    parts.emplace_back(input.substr(begin_pos, separator_pos - begin_pos));
+    return parts;
+}
+
+//for llama.cpp style device overrides e.g. --device Vulkan0,Vulkan1
+std::vector<ggml_backend_dev_t> kcpp_parse_device_list(const std::string & value) {
+    std::vector<ggml_backend_dev_t> devices;
+    auto dev_names = kcpp_string_split(value, ',');
+    if (dev_names.empty()) {
+        printf("\nkcpp_parse_device_list error: no devices specified\n");
+        return std::vector<ggml_backend_dev_t>();
+    }
+    if (dev_names.size() == 1 && dev_names[0] == "none") {
+        return std::vector<ggml_backend_dev_t>();
+    } else {
+        for (const auto & device : dev_names) {
+            auto * dev = ggml_backend_dev_by_name(device.c_str());
+            if (!dev || ggml_backend_dev_type(dev) == GGML_BACKEND_DEVICE_TYPE_CPU) {
+                printf("\nkcpp_parse_device_list error: invalid device: %s\n",device.c_str());
+                return std::vector<ggml_backend_dev_t>();
+            }
+            devices.push_back(dev);
+        }
+        devices.push_back(nullptr);
+    }
+    return devices;
+}
+
+bool kcpp_string_ends_with(const std::string& str, const std::string& suffix) {
+    return str.size() >= suffix.size() &&
+           str.compare(str.size() - suffix.size(), suffix.size(), suffix) == 0;
+}
+
+std::string kcpp_rstrip(const std::string& s) {
+    size_t end = s.find_last_not_of(" \t\n\r\f\v");
+    return (end == std::string::npos) ? "" : s.substr(0, end + 1);
+}
+
+//counts the number of matching prefix tokens between two sequences
+int ComputeSharedPrefixLength(const std::vector<int> &tokens_a,const std::vector<int> &tokens_b)
+{
+    size_t min_length = std::min(tokens_a.size(), tokens_b.size());
+
+    int match_count = 0;
+    for (size_t i = 0; i < min_length; ++i) {
+        if (tokens_a[i] != tokens_b[i]) {
+            break;
+        }
+        match_count++;
+    }
+
+    return match_count;
+}
+
+//counts the number of matching prefix tokens between two sequences, returns percentage matched 0.0 to 1.0
+float ComputePrefixMatchPercent(const std::vector<int> &tokens_a,const std::vector<int> &tokens_b)
+{
+    size_t min_length = std::min(tokens_a.size(), tokens_b.size());
+
+    if (min_length == 0) {
+        return 0.0f;
+    }
+
+    int match_count = ComputeSharedPrefixLength(tokens_a, tokens_b);
+    return static_cast<float>(match_count) / static_cast<float>(min_length);
+}
+
+//returns true if and only if sequence 1 is fully contained within the starting of sequence 2
+bool FullyContainedPrefix(std::vector<int> &sequence1, std::vector<int> &sequence2)
+{
+    if (sequence1.size() > sequence2.size() || sequence1.size()==0 || sequence2.size()==0) {
+        return false;
+    }
+    for (size_t i = 0; i < sequence1.size(); ++i) {
+        if (sequence1[i] != sequence2[i]) {
+            return false;
+        }
+    }
     return true;
 }

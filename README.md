@@ -5,9 +5,13 @@
 - Single file executable, with no installation required and no external dependencies
 - Runs on CPU or GPU, supports full or partial offloaded
 - LLM text generation (Supports all GGML and GGUF models, backwards compatibility with ALL past models)
-- Image Generation (Stable Diffusion 1.5, SDXL, SD3, Flux)
+- Image Generation and Image Editing (Stable Diffusion 1.5, SDXL, SD3, Flux, Qwen Image, Z-Image, Klein)
+- Video Generation (WAN 2.2)
 - Speech-To-Text (Voice Recognition) via Whisper
-- Text-To-Speech (Voice Generation) via OuteTTS, Kokoro, Parler and Dia
+- Text-To-Speech (Voice Generation) via Qwen3TTS, Kokoro, OuteTTS, Parler and Dia
+- Music Generation (Ace Step 1.5)
+- Image Recognition (Multimodal Vision)
+- MCP Server support and tool calling
 - Provides many compatible APIs endpoints for many popular webservices (KoboldCppApi OpenAiApi OllamaApi A1111ForgeApi ComfyUiApi WhisperTranscribeApi XttsApi OpenAiSpeechApi)
 - Bundled KoboldAI Lite UI with editing tools, save formats, memory, world info, author's note, characters, scenarios.
 - Includes multiple modes (chat, adventure, instruct, storywriter) and UI Themes (aesthetic roleplay, classic writer, corporate assistant, messsenger)
@@ -60,7 +64,8 @@ A typical start command looks like this: ``python koboldcpp.py --threads 6 --bla
 For more information, be sure to run the program with the `--help` flag, or [check the wiki](https://github.com/LostRuins/koboldcpp/wiki).
 ## Obtaining a GGUF model
 - KoboldCpp uses GGUF models. They are not included with KoboldCpp, but you can download GGUF files from other places such as [Bartowski's Huggingface](https://huggingface.co/bartowski). Search for "GGUF" on huggingface.co for plenty of compatible models in the `.gguf` format.
-- For beginners, we recommend the models [L3-8B-Stheno-v3.2](https://huggingface.co/bartowski/L3-8B-Stheno-v3.2-GGUF/resolve/main/L3-8B-Stheno-v3.2-Q4_K_S.gguf) (smaller and weaker) or [Tiefighter 13B](https://huggingface.co/KoboldAI/LLaMA2-13B-Tiefighter-GGUF/resolve/main/LLaMA2-13B-Tiefighter.Q4_K_S.gguf) (old but very versatile model) or [Gemma-3-27B Abliterated](https://huggingface.co/mlabonne/gemma-3-27b-it-abliterated-GGUF/resolve/main/gemma-3-27b-it-abliterated.q4_k_m.gguf) (largest and most powerful)
+- For beginners, we recommend [Qwen3-VL-8B](https://huggingface.co/unsloth/Qwen3-VL-8B-Instruct-GGUF/resolve/main/Qwen3-VL-8B-Instruct-Q4_K_S.gguf) **(Most Recommended, best all rounder model)**
+- For creative writing and roleplay, you can try [L3-8B-Stheno-v3.2](https://huggingface.co/bartowski/L3-8B-Stheno-v3.2-GGUF/resolve/main/L3-8B-Stheno-v3.2-Q4_K_S.gguf) (old, smaller and weaker) or [Tiefighter 13B](https://huggingface.co/KoboldAI/LLaMA2-13B-Tiefighter-GGUF/resolve/main/LLaMA2-13B-Tiefighter.Q4_K_S.gguf) (old but very versatile model).
 - [Alternatively, you can download the tools to convert models to the GGUF format yourself here](https://kcpptools.concedo.workers.dev). Run `convert-hf-to-gguf.py` to convert them, then `quantize_gguf.exe` to quantize the result.
 - Other models for Whisper (speech recognition), Image Generation, Text to Speech or Image Recognition [can be found on the Wiki](https://github.com/LostRuins/koboldcpp/wiki#what-models-does-koboldcpp-support-what-architectures-are-supported)
 
@@ -262,6 +267,8 @@ For more information, be sure to run the program with the `--help` flag, or [che
 - Since v1.60, provides native image generation with StableDiffusion.cpp, you can load any SD1.5 or SDXL .safetensors model and it will provide an A1111 compatible API to use.
 - **I try to keep backwards compatibility with ALL past llama.cpp models**. But you are also encouraged to reconvert/update your models if possible for best results.
 - Since v1.75, openblas has been deprecated and removed in favor of the native CPU implementation.
+- Since v1.107, CLBlast has been deprecated and removed in favor of Vulkan.
+- Phishing SCAM Warning: koboldcpp(dot)com is NOT an official site, please help to report it to google for impersonation. You should ONLY trust official downloads from the release binaries on the official github at https://github.com/LostRuins/koboldcpp/releases/latest
 
 ## License
 - The original GGML library, stable-diffusion.cpp and llama.cpp by ggerganov are licensed under the MIT License
@@ -270,6 +277,8 @@ For more information, be sure to run the program with the `--help` flag, or [che
 - Llama.cpp source repo is at https://github.com/ggml-org/llama.cpp (MIT)
 - Stable-diffusion.cpp source repo is at https://github.com/leejet/stable-diffusion.cpp (MIT)
 - TTS.cpp source repo is at https://github.com/mmwillet/TTS.cpp (MIT)
+- Qwen3TTS source repo is at https://github.com/predict-woo/qwen3-tts.cpp (MIT)
+- AceStep.cpp source repo is at https://github.com/ServeurpersoCom/acestep.cpp (MIT)
 - KoboldCpp source repo is at https://github.com/LostRuins/koboldcpp (AGPL)
 - KoboldAI Lite source repo is at https://github.com/LostRuins/lite.koboldai.net (AGPL)
 - For any further enquiries, contact @concedo on discord, or LostRuins on github.

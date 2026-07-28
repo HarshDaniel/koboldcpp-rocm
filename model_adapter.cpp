@@ -16,6 +16,7 @@
 
 #include <chrono>
 #include <filesystem>
+#include "src/llama-arch.h"
 
 static auto bench_timer = std::chrono::high_resolution_clock().now();
 
@@ -361,53 +362,9 @@ std::string gguf_get_model_arch(const std::string & gguf_filename)
             int filever = gguf_get_version(ctx);
 
             fileformatmeta->fileversion = filever;
-            fileformatmeta->model_architecture = GGUFArch::ARCH_DEFAULT;
+            fileformatmeta->model_architecture = llm_arch_from_string(modelarch);
             fileformatmeta->model_architecture_str = modelarch;
-            if(modelarch=="phi2")
-            {
-                fileformatmeta->model_architecture = GGUFArch::ARCH_PHI;
-            }
-            else if(modelarch=="falcon")
-            {
-                fileformatmeta->model_architecture = GGUFArch::ARCH_FALCON;
-            }
-            else if(modelarch=="mamba" || modelarch=="mamba2" || modelarch=="nemotron_h" || modelarch=="jamba" || modelarch=="granitehybrid" || modelarch=="lfm2"
-            || modelarch=="plamo2" || modelarch=="falcon-h1") //lazy approach, put all non rwkv RNN models
-            {
-                fileformatmeta->model_architecture = GGUFArch::ARCH_MAMBALIKE;
-            }
-            else if(modelarch=="llama" && freq_base_train==10000.0f && (n_tensors==435 || n_tensors==611))
-            {
-                fileformatmeta->model_architecture = GGUFArch::ARCH_SOLAR;
-            }
-            else if(modelarch=="qwen2")
-            {
-                fileformatmeta->model_architecture = GGUFArch::ARCH_QWEN2;
-            }
-            else if(modelarch=="qwen2vl")
-            {
-                fileformatmeta->model_architecture = GGUFArch::ARCH_QWEN2VL;
-            }
-            else if(modelarch=="gemma3")
-            {
-                fileformatmeta->model_architecture = GGUFArch::ARCH_GEMMA3;
-            }
-            else if(modelarch=="gemma3n")
-            {
-                fileformatmeta->model_architecture = GGUFArch::ARCH_GEMMA3N;
-            }
-            else if(modelarch=="rwkv6" || modelarch=="rwkv7" || modelarch=="rwkv6qwen2" || modelarch=="arwkv7")
-            {
-                fileformatmeta->model_architecture = GGUFArch::ARCH_RWKV;
-            }
-            else if(modelarch=="glm4" || modelarch=="glm4moe")
-            {
-                fileformatmeta->model_architecture = GGUFArch::ARCH_GLM4;
-            }
-            else if(modelarch=="gpt-oss")
-            {
-                fileformatmeta->model_architecture = GGUFArch::ARCH_GPTOSS;
-            }
+
             printf("Arch Category: %d\n",fileformatmeta->model_architecture);
 
         }
@@ -511,15 +468,15 @@ std::string gguf_get_model_arch(const std::string & gguf_filename)
      return longest;
  }
 
- void ContextFastForward(std::vector<int> &current_context_tokens, std::vector<int> &embd_inp,
- int &n_past, std::vector<int> &last_n_tokens, const int nctx, std::vector<int> &smartcontext,
- bool useSmartContext, const bool requireFullSubset, const int minimum_to_proceed)
- {
-     const int SCCtxLenThreshold = nctx * 0.8; //how much context length must be reach to trigger smartcontext
-     const int SCInpLenThreshold = nctx * 0.6; //how big must the input array be to trigger smartcontext
-     const int SCPastLenThreshold = nctx * 0.5; //how wide of a gap between the fast forwarded past and the present to trigger smart context
-     const float SCTruncationRatio = 0.5; //ratio for how many tokens to fast forward
-     const int SCTokThreshold = 32 + (nctx*0.05); //how many tokens of similarity triggers smartcontext
+void ContextFastForward(std::vector<int> &current_context_tokens, std::vector<int> &embd_inp,
+int &n_past, std::vector<int> &last_n_tokens, const int nctx, std::vector<int> &smartcontext,
+bool useSmartContext, const bool requireFullSubset, const int minimum_to_proceed, const int minimum_input_to_keep)
+{
+    const int SCCtxLenThreshold = nctx * 0.8; //how much context length must be reach to trigger smartcontext
+    const int SCInpLenThreshold = nctx * 0.6; //how big must the input array be to trigger smartcontext
+    const int SCPastLenThreshold = nctx * 0.5; //how wide of a gap between the fast forwarded past and the present to trigger smart context
+    const float SCTruncationRatio = 0.5; //ratio for how many tokens to fast forward
+    const int SCTokThreshold = 32 + (nctx*0.05); //how many tokens of similarity triggers smartcontext
 
 
     //fast forward the past based on identical tokens, stop once a divergence is noted
@@ -529,6 +486,16 @@ std::string gguf_get_model_arch(const std::string & gguf_filename)
 
     for (int i = 0; i < cur_ctx_len; ++i)
     {
+        if (i >= embd_inp_len)
+        {
+            if(requireFullSubset)
+            {
+                last_n_tokens.erase(last_n_tokens.end() - n_past, last_n_tokens.end());
+                n_past = 0;
+                fastforwardok = false;
+            }
+            break;
+        }
         if (current_context_tokens[i] == embd_inp[i])
         {
             n_past += 1;
@@ -573,6 +540,17 @@ std::string gguf_get_model_arch(const std::string & gguf_filename)
         last_n_tokens.erase(last_n_tokens.end() - n_past, last_n_tokens.end());
         n_past = 0;
         fastforwardok = false;
+    }
+
+    //we must ensure that embd_input is at least minimum_input_to_keep if possible, or as large as it can be
+    if (minimum_input_to_keep > 0 && n_past > embd_inp_len - minimum_input_to_keep)
+    {
+        int max_allowed_past = std::max(0, embd_inp_len - minimum_input_to_keep);
+        n_past = max_allowed_past;
+        if(n_past<=0)
+        {
+            fastforwardok = false;
+        }
     }
 
     if(fastforwardok)

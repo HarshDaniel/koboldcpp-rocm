@@ -7,6 +7,7 @@
 #include <fstream>
 #include <sstream>
 #include <filesystem>
+#include <regex>
 
 static std::string rm_leading_dashes(const std::string & str) {
     size_t pos = 0;
@@ -14,6 +15,23 @@ static std::string rm_leading_dashes(const std::string & str) {
         ++pos;
     }
     return str.substr(pos);
+}
+
+static std::string canonical_tag(const std::string & tag) {
+    static const std::regex re_tag("[-.]([A-Z0-9_]+)$", std::regex::icase);
+    std::smatch m;
+    if (std::regex_search(tag, m, re_tag)) {
+        std::string canon = m[1].str();
+        for (char & c : canon) {
+            c = (char) std::toupper((unsigned char) c);
+        }
+        return canon;
+    }
+    std::string upper = tag;
+    for (char & c : upper) {
+        c = (char) std::toupper((unsigned char) c);
+    }
+    return upper;
 }
 
 std::vector<std::string> common_preset::to_args(const std::string & bin_path) const {
@@ -24,7 +42,14 @@ std::vector<std::string> common_preset::to_args(const std::string & bin_path) co
     }
 
     for (const auto & [opt, value] : options) {
-        args.push_back(opt.args.back()); // use the last arg as the main arg
+        if (opt.is_preset_only) {
+            continue; // skip preset-only options (they are not CLI args)
+        }
+
+        // use the last arg as the main arg (i.e. --long-form)
+        args.push_back(opt.args.back());
+
+        // handle value(s)
         if (opt.value_hint == nullptr && opt.value_hint_2 == nullptr) {
             // flag option, no value
             if (common_arg_utils::is_falsey(value)) {
@@ -111,6 +136,34 @@ bool common_preset::get_option(const std::string & env, std::string & value) con
 void common_preset::merge(const common_preset & other) {
     for (const auto & [opt, val] : other.options) {
         options[opt] = val; // overwrite existing options
+    }
+}
+
+void common_preset::apply_to_params(common_params & params, const std::set<std::string> & handled_keys) const {
+    for (const auto & [opt, val] : options) {
+        if (!handled_keys.empty()) {
+            if (!opt.env || handled_keys.find(opt.env) == handled_keys.end()) {
+                continue;
+            }
+        }
+        // apply each option to params
+        if (opt.handler_string) {
+            opt.handler_string(params, val);
+        } else if (opt.handler_int) {
+            opt.handler_int(params, std::stoi(val));
+        } else if (opt.handler_bool) {
+            opt.handler_bool(params, common_arg_utils::is_truthy(val));
+        } else if (opt.handler_str_str) {
+            // not supported yet
+            throw std::runtime_error(string_format(
+                "%s: option with two values is not supported yet",
+                __func__
+            ));
+        } else if (opt.handler_void) {
+            opt.handler_void(params);
+        } else {
+            GGML_ABORT("unknown handler type");
+        }
     }
 }
 
@@ -224,8 +277,10 @@ static std::string parse_bool_arg(const common_arg & arg, const std::string & ke
 }
 
 common_preset_context::common_preset_context(llama_example ex)
-    : ctx_params(common_params_parser_init(default_params, ex)),
-      key_to_opt(get_map_key_opt(ctx_params)) {}
+        : ctx_params(common_params_parser_init(default_params, ex)) {
+    common_params_add_preset_options(ctx_params.options);
+    key_to_opt = get_map_key_opt(ctx_params);
+}
 
 common_presets common_preset_context::load_from_ini(const std::string & path, common_preset & global) const {
     common_presets out;
@@ -233,14 +288,32 @@ common_presets common_preset_context::load_from_ini(const std::string & path, co
 
     for (auto section : ini_data) {
         common_preset preset;
-        if (section.first.empty()) {
-            preset.name = COMMON_PRESET_DEFAULT_NAME;
-        } else {
-            preset.name = section.first;
+        std::string section_name = section.first.empty() ? std::string(COMMON_PRESET_DEFAULT_NAME) : section.first;
+        if (section_name != "*" && section_name != COMMON_PRESET_DEFAULT_NAME) {
+            auto colon_idx = section_name.rfind(':');
+            if (colon_idx != std::string::npos) {
+                std::string tag       = section_name.substr(colon_idx + 1);
+                std::string canon_tag = canonical_tag(tag);
+                if (canon_tag != tag) {
+                    section_name = section_name.substr(0, colon_idx + 1) + canon_tag;
+                }
+            }
         }
+        preset.name = section_name;
         LOG_DBG("loading preset: %s\n", preset.name.c_str());
         for (const auto & [key, value] : section.second) {
+            if (key == "version") {
+                // skip version key (reserved for future use)
+                continue;
+            }
+
             LOG_DBG("option: %s = %s\n", key.c_str(), value.c_str());
+            if (filter_allowed_keys && allowed_keys.find(key) == allowed_keys.end()) {
+                throw std::runtime_error(string_format(
+                    "option '%s' is not allowed in remote presets",
+                    key.c_str()
+                ));
+            }
             if (key_to_opt.find(key) != key_to_opt.end()) {
                 const auto & opt = key_to_opt.at(key);
                 if (is_bool_arg(opt)) {
@@ -250,7 +323,10 @@ common_presets common_preset_context::load_from_ini(const std::string & path, co
                 }
                 LOG_DBG("accepted option: %s = %s\n", key.c_str(), preset.options[opt].c_str());
             } else {
-                // TODO: maybe warn about unknown key?
+                throw std::runtime_error(string_format(
+                    "option '%s' not recognized in preset '%s'",
+                    key.c_str(), preset.name.c_str()
+                ));
             }
         }
 
