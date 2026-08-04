@@ -226,6 +226,10 @@ if (LLAMA_HIPBLAS)
         set_property(TARGET ggml-rocm PROPERTY CXX_COMPILER ${ROCM_CXX})
 
         target_compile_options(ggml-rocm PRIVATE -O2)
+        # Fast math for HIP, like CUDA's -use_fast_math. Not -ffast-math: that implies -ffinite-math-only,
+        # which breaks ggml's INFINITY masking and produces NaNs. -funsafe-math-optimizations gives the
+        # speedup without the NaN problems.
+        target_compile_options(ggml-rocm PRIVATE -funsafe-math-optimizations)
 		target_include_directories(ggml-rocm PUBLIC ./ggml/include ./ggml/src ./include ./otherarch ./otherarch/tools)
         if (LLAMA_CUDA_FORCE_DMMV)
             target_compile_definitions(ggml-rocm PUBLIC GGML_CUDA_FORCE_DMMV)

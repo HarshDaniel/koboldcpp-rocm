@@ -875,6 +875,7 @@ lib_option_pairs = [
     (lib_failsafe, "Failsafe Mode (Older CPU)")]
 default_option, cublas_option, hipblas_option, vulkan_option, noavx2_option, vulkan_noavx2_option, vulkan_failsafe_option, failsafe_option = (opt if file_exists(lib) or (os.name == 'nt' and file_exists(opt + ".dll")) else None for lib, opt in lib_option_pairs)
 runopts = [opt for lib, opt in lib_option_pairs if file_exists(lib)]
+antirunopts = [opt.replace("Use ", "") for lib, opt in lib_option_pairs if not (opt in runopts)]
 
 def get_amd_gfx_vers_linux():
     from subprocess import run
@@ -12711,7 +12712,7 @@ def kcpp_main_process(launch_args, g_memory=None, gui_launcher=False):
                     time.sleep(1)
 
     if start_server:
-        if args.checkforupdates:
+        if getattr(args, "checkforupdates", False):
             check_latest_version()
         if args.remotetunnel:
             if remote_url:
