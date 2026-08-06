@@ -280,25 +280,22 @@ ggml_v3-cuda.o: otherarch/ggml_v3-cuda.cu otherarch/ggml_v3-cuda.h
 endif # LLAMA_CUBLAS
 
 ifdef LLAMA_HIPBLAS
-ifeq ($(wildcard /opt/rocm),)
-ROCM_PATH   ?= /usr
+# Fedora/rock-dkms keeps ROCm under /usr (usually with /opt/rocm -> /usr/lib64/rocm);
+# other distros use /opt/rocm. Choose whichever prefix is actually installed.
+ROCM_PATH   ?= $(firstword $(wildcard /opt/rocm /usr/lib64/rocm /usr/lib/rocm /usr))
+ROCM_LIBDIR := $(firstword $(wildcard \
+    $(ROCM_PATH)/lib64 $(ROCM_PATH)/lib \
+    /usr/lib64 /usr/lib \
+    ))
 ifdef LLAMA_PORTABLE
 GPU_TARGETS ?= gfx803 gfx900 gfx906 gfx908 gfx90a gfx942 gfx1010 gfx1030 gfx1031 gfx1032 gfx1100 gfx1101 gfx1102 gfx1200 gfx1201 $(shell $(shell which amdgpu-arch))
 else
-GPU_TARGETS ?= $(shell $(shell which amdgpu-arch))
+GPU_TARGETS ?= $(shell $(shell which amdgpu-arch 2>/dev/null || $(ROCM_PATH)/llvm/bin/amdgpu-arch 2>/dev/null))
 endif
-HCC         := $(ROCM_PATH)/bin/hipcc
-HCXX        := $(ROCM_PATH)/bin/hipcc
-else
-ROCM_PATH   ?= /opt/rocm
-ifdef LLAMA_PORTABLE
-GPU_TARGETS ?= gfx803 gfx900 gfx906 gfx908 gfx90a gfx942 gfx1010 gfx1030 gfx1031 gfx1032 gfx1100 gfx1101 gfx1102 gfx1200 gfx1201 $(shell $(ROCM_PATH)/llvm/bin/amdgpu-arch)
-else
-GPU_TARGETS ?= $(shell $(ROCM_PATH)/llvm/bin/amdgpu-arch)
-endif
-HCC         := $(ROCM_PATH)/llvm/bin/clang
-HCXX        := $(ROCM_PATH)/llvm/bin/clang++
-endif
+# Prefer the LLVM clang that ships with ROCm (handles --offload-arch correctly),
+# fall back to hipcc for layouts where only the CLR toolchain is installed.
+HCC         := $(firstword $(wildcard $(ROCM_PATH)/llvm/bin/clang $(ROCM_PATH)/bin/clang $(ROCM_PATH)/bin/hipcc))
+HCXX        := $(firstword $(wildcard $(ROCM_PATH)/llvm/bin/clang++ $(ROCM_PATH)/bin/clang++ $(ROCM_PATH)/bin/hipcc))
 ifdef GGML_HIP_FORCE_ROCWMMA_FATTN_GFX12
 HIPFLAGS   += -DGGML_HIP_ROCWMMA_FATTN_GFX12
 CFLAGS     += -DGGML_HIP_ROCWMMA_FATTN_GFX12
@@ -334,8 +331,7 @@ HIPLDFLAGS += -lhipblaslt
 endif
 
 HIPFLAGS   += -DGGML_USE_HIP -DGGML_HIP_NO_VMM -DGGML_USE_CUDA $(shell $(ROCM_PATH)/bin/hipconfig -C)
-HIPLDFLAGS    += -L$(ROCM_PATH)/lib -Wl,-rpath=$(ROCM_PATH)/lib
-HIPLDFLAGS    += -L$(ROCM_PATH)/lib64 -Wl,-rpath=$(ROCM_PATH)/lib64
+HIPLDFLAGS    += -L$(ROCM_LIBDIR) -Wl,-rpath=$(ROCM_LIBDIR)
 HIPLDFLAGS    += -lhipblas -lamdhip64 -lrocblas
 HIP_OBJS      += ggml-cuda.o ggml_v3-cuda.o ggml_v2-cuda.o ggml_v2-cuda-legacy.o
 HIP_OBJS      += $(patsubst %.cu,%.o,$(filter-out ggml/src/ggml-cuda/ggml-cuda.cu, $(wildcard ggml/src/ggml-cuda/*.cu)))
