@@ -307,12 +307,30 @@ endif
 ifdef LLAMA_NO_WMMA
 HIPFLAGS   += -DGGML_HIP_NO_ROCWMMA_FATTN
 else
-DETECT_ROCWMMA := $(shell find -L /opt/rocm/include /usr/include -type f -name rocwmma.hpp 2>/dev/null | head -n 1)
+# Prefer a user-specified rocwmma.hpp, else search the standard install prefixes
+# (also covers rock-dkms/rpm layouts where headers live under /usr and /usr/share
+# does not carry rocwmma.hpp - users may point LLAMA_ROCWMMA_HPP at the file).
+ifdef LLAMA_ROCWMMA_HPP
+DETECT_ROCWMMA := $(LLAMA_ROCWMMA_HPP)
+else
+DETECT_ROCWMMA := \
+	$(firstword \
+		$(shell find -L /opt/rocm/include /usr/include /usr/local/include \
+			-type f -name rocwmma.hpp 2>/dev/null | head -n 1) \
+	)
+endif
 ifdef DETECT_ROCWMMA
 HIPFLAGS   += -DGGML_HIP_ROCWMMA_FATTN -I$(dir $(DETECT_ROCWMMA))
 else
 HIPFLAGS   += -DGGML_HIP_NO_ROCWMMA_FATTN
 endif
+endif
+
+# hipBLASLt: opt-in GEMM backend. Only useful on CDNA/consumer GPUs where hipBLASLt
+# beats classic hipBLAS for the LLM-sized batched GEMMs. Harmless if absent.
+ifdef LLAMA_HIPBLASLT
+HIPFLAGS   += -DGGML_USE_HIPBLASLT
+HIPLDFLAGS += -lhipblaslt
 endif
 
 HIPFLAGS   += -DGGML_USE_HIP -DGGML_HIP_NO_VMM -DGGML_USE_CUDA $(shell $(ROCM_PATH)/bin/hipconfig -C)

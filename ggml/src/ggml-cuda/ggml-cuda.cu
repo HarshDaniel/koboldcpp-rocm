@@ -2410,6 +2410,26 @@ static void ggml_cuda_mul_mat_batched_cublas_impl(ggml_backend_cuda_context & ct
         const int64_t sma = ne02 == 1 ? nb03/nb00 : nb02/nb00;
         const int64_t smb = ne12 == 1 ? s13       : s12;
 
+#if defined(GGML_USE_HIPBLASLT)
+        // Opt-in hipBLASLt group-gemm: better on CDNA / newer RDNA for the
+        // batched-KV GEMMs, and avoids the classic hipBLAS strided-batch path.
+        // Guarded on GGML_USE_HIPBLASLT (set by LLAMA_HIPBLASLT=1 in the Makefile).
+        const int64_t nbatch_lt = ne12*ne13;
+        hipblasStatus_t lt_status = hipblasLtGemmStridedBatched(
+            /*lt_handle=*/nullptr, // hipBLASLt uses its own internal plan caching
+            HIPBLAS_OP_T, HIPBLAS_OP_N,
+            ne01, ne11, ne10,
+            alpha,            src0_ptr, cu_data_type_a, nb01/nb00, sma,
+                               src1_ptr, cu_data_type_b, s11,       smb,
+            beta,               dst_t,   cu_data_type,   ne0,       ne1*ne0,
+            nbatch_lt,
+            cu_compute_type, HIPBLAS_GEMM_DEFAULT);
+        if (lt_status == HIPBLAS_STATUS_SUCCESS) {
+            return;
+        }
+        // fall back to classic path on any error (e.g. unsupported dtype/arch)
+#endif // defined(GGML_USE_HIPBLASLT)
+
         // there is no broadcast and src0, src1 are contiguous across dims 2, 3
         // use cublasGemmStridedBatchedEx
         CUBLAS_CHECK(

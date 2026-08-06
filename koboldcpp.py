@@ -1967,6 +1967,18 @@ def auto_set_backend_cli():
         if "Use CUDA" in runopts or "Use hipBLAS (ROCm)" in runopts:
             args.usecuda = ["normal","mmq"]
             print(f"Auto Selected CUDA Backend (flag={cpusupport})\n")
+            # ROCm (hipBLAS) prompt processing is strongly batch-size bound; the
+            # default 512 can leave RDNA GEMMs half-idle. Suggest a larger batch
+            # unless the user already picked one explicitly.
+            if "Use hipBLAS (ROCm)" in runopts:
+                if not (hasattr(args, "batchsize") and args.batchsize not in (None, 512)) \
+                        and not os.environ.get("KCPP_NO_AUTO_BATCH"):
+                    auto_batch = 1024 if MaxMemory[0] > 8*1024**3 else 512
+                    print(f"Auto Selected hipBLAS Batch Size: {auto_batch} (set KCPP_NO_AUTO_BATCH=1 to disable)\n")
+                    args.batchsize = auto_batch
+            # Honor unified memory for low-VRAM cards (compiled-in, env-gated)
+            if os.environ.get("GGML_CUDA_ENABLE_UNIFIED_MEMORY"):
+                print("GGML_CUDA_ENABLE_UNIFIED_MEMORY set - using unified memory (hipMallocManaged)\n")
             found_new_backend = True
     elif exitcounter < 100 and (1 in VKIsDGPU) and ("Use Vulkan" in runopts or "Use Vulkan (Old CPU)" in runopts):
         for i in range(0,len(VKIsDGPU)):
