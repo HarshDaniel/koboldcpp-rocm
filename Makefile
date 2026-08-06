@@ -288,9 +288,9 @@ ROCM_LIBDIR := $(firstword $(wildcard \
     /usr/lib64 /usr/lib \
     ))
 ifdef LLAMA_PORTABLE
-GPU_TARGETS ?= gfx803 gfx900 gfx906 gfx908 gfx90a gfx942 gfx1010 gfx1030 gfx1031 gfx1032 gfx1100 gfx1101 gfx1102 gfx1200 gfx1201 $(shell $(shell which amdgpu-arch))
+GPU_TARGETS ?= gfx803 gfx900 gfx906 gfx908 gfx90a gfx942 gfx1010 gfx1030 gfx1031 gfx1032 gfx1100 gfx1101 gfx1102 gfx1200 gfx1201 $(shell which amdgpu-arch 2>/dev/null)
 else
-GPU_TARGETS ?= $(shell $(shell which amdgpu-arch 2>/dev/null || $(ROCM_PATH)/llvm/bin/amdgpu-arch 2>/dev/null))
+GPU_TARGETS ?= $(shell which amdgpu-arch 2>/dev/null || $(ROCM_PATH)/llvm/bin/amdgpu-arch 2>/dev/null)
 endif
 # Prefer the LLVM clang that ships with ROCm (handles --offload-arch correctly),
 # fall back to hipcc for layouts where only the CLR toolchain is installed.
@@ -330,7 +330,7 @@ HIPFLAGS   += -DGGML_USE_HIPBLASLT
 HIPLDFLAGS += -lhipblaslt
 endif
 
-HIPFLAGS   += -DGGML_USE_HIP -DGGML_HIP_NO_VMM -DGGML_USE_CUDA $(shell $(ROCM_PATH)/bin/hipconfig -C)
+HIPFLAGS   += -DGGML_USE_HIP -DGGML_HIP_NO_VMM -DGGML_USE_CUDA $(shell $(if $(shell which hipconfig 2>/dev/null),hipconfig,$(ROCM_PATH)/bin/hipconfig) -C 2>/dev/null)
 HIPLDFLAGS    += -L$(ROCM_LIBDIR) -Wl,-rpath=$(ROCM_LIBDIR)
 HIPLDFLAGS    += -lhipblas -lamdhip64 -lrocblas
 HIP_OBJS      += ggml-cuda.o ggml_v3-cuda.o ggml_v2-cuda.o ggml_v2-cuda-legacy.o
