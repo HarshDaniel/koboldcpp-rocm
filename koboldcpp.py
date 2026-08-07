@@ -1723,6 +1723,13 @@ def autoset_gpu_layers(ctxsize, sdquanted, bbs, musiclowvram): #shitty algo to d
             showusedmemwarning = False
             print(f"Note: KoboldCpp has detected that a significant amount of GPU VRAM ({usedmem/1024/1024} MB) is currently used by another application.\nFor best results, you may wish to close that application and then restart KoboldCpp.\n***")
     reservedmem = max(1.25*1024*1024*1024,(0.5*1024*1024*1024 + usedmem)) # determine vram overhead
+    # ROCm allocations include a less predictable runtime/scratch component than
+    # CUDA's reported free-memory value. Reserve room before selecting layers and
+    # pass the same allowance to the native AutoFit calculation below.
+    is_rocm_fallback = args and args.usecuda is not None and not file_exists(lib_cublas) and file_exists(lib_hipblas)
+    if is_rocm_fallback:
+        rocm_runtime_reserve = 512*1024*1024
+        reservedmem += rocm_runtime_reserve
     try:
         if not modelfile_extracted_meta:
             return 0
@@ -1743,6 +1750,8 @@ def autoset_gpu_layers(ctxsize, sdquanted, bbs, musiclowvram): #shitty algo to d
                         fsize *= total_parts
 
             calulated_gpu_overhead = 0
+            if is_rocm_fallback:
+                calulated_gpu_overhead += rocm_runtime_reserve
             unsubmitted_overhead = 0 #this overhead is used to calculate for local estimate but not sent to backend
             musicoh1 = 0
             musicoh2 = 0
@@ -12755,7 +12764,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=f'KoboldCpp Server - Version {KcppVersion}')
 
     compatgroup = parser.add_mutually_exclusive_group()
-    compatgroup.add_argument("--usecuda", "--usecublas", "--usehipblas", help="Use CUDA for GPU Acceleration. Requires CUDA. Enter a number afterwards to select and use 1 GPU. Leaving no number will use all GPUs.", nargs='*',metavar=('[main GPU ID]'), choices=['0','1','2','3','all',  'mmq','nommq','normal','lowvram','rowsplit'])
+    compatgroup.add_argument("--usecuda", "--usecublas", "--usehipblas", help="Use CUDA or hipBLAS/ROCm GPU acceleration. Enter a number afterwards to select and use 1 GPU. Leaving no number will use all GPUs.", nargs='*',metavar=('[main GPU ID]'), choices=['0','1','2','3','all',  'mmq','nommq','normal','lowvram','rowsplit'])
     compatgroup.add_argument("--usevulkan", help="Use Vulkan for GPU Acceleration. Can optionally specify one or more GPU Device ID (e.g. --usevulkan 0), leave blank to autodetect.", metavar=('[Device IDs]'), nargs='*', type=int, default=None)
     compatgroup.add_argument("--usecpu", help="Do not use any GPU acceleration (CPU Only)", action='store_true')
     modelgroup = parser.add_mutually_exclusive_group() #we want to be backwards compatible with the unnamed positional args
@@ -12766,7 +12775,7 @@ if __name__ == '__main__':
     parser.add_argument("--gpulayers","--gpu-layers","--n-gpu-layers","-ngl", help="Set number of layers to offload to GPU (when using GPU). Set to -1 to enable autofit (default), set to 0 to disable GPU offload.",metavar=('[GPU layers]'), nargs='?', const=1, type=int, default=-1)
     parser.add_argument("--host", metavar=('[ipaddr]'), help="Host IP to listen on. If this flag is not set, all routable interfaces are accepted.", default="")
     parser.add_argument("--launch", help="Launches a web browser when load is completed.", action='store_true')
-    parser.add_argument("--tensor_split","--tensorsplit","--tensor-split","-ts", help="For CUDA and Vulkan only, ratio to split tensors across multiple GPUs, space-separated list of proportions, e.g. 7 3", metavar=('[Ratios]'), type=float, nargs='+')
+    parser.add_argument("--tensor_split","--tensorsplit","--tensor-split","-ts", help="For CUDA, hipBLAS/ROCm, and Vulkan: ratio to split tensors across multiple GPUs, space-separated list of proportions, e.g. 7 3", metavar=('[Ratios]'), type=float, nargs='+')
     parser.add_argument("--threads","-t", metavar=('[threads]'), help="Use a custom number of threads if specified. Otherwise, uses an amount based on CPU cores", type=int, default=get_default_threads())
     portgroup = parser.add_mutually_exclusive_group() #we want to be backwards compatible with the unnamed positional args
     portgroup.add_argument("--port", metavar=('[portnumber]'), help=f"Port to listen on. (Defaults to {defaultport})", default=defaultport, type=int, action='store')

@@ -296,33 +296,6 @@ endif
 # fall back to hipcc for layouts where only the CLR toolchain is installed.
 HCC         := $(firstword $(wildcard $(ROCM_PATH)/llvm/bin/clang $(ROCM_PATH)/bin/clang $(ROCM_PATH)/bin/hipcc))
 HCXX        := $(firstword $(wildcard $(ROCM_PATH)/llvm/bin/clang++ $(ROCM_PATH)/bin/clang++ $(ROCM_PATH)/bin/hipcc))
-ifdef GGML_HIP_FORCE_ROCWMMA_FATTN_GFX12
-HIPFLAGS   += -DGGML_HIP_ROCWMMA_FATTN_GFX12
-CFLAGS     += -DGGML_HIP_ROCWMMA_FATTN_GFX12
-CXXFLAGS   += -DGGML_HIP_ROCWMMA_FATTN_GFX12
-endif
-ifdef LLAMA_NO_WMMA
-HIPFLAGS   += -DGGML_HIP_NO_ROCWMMA_FATTN
-else
-# Prefer a user-specified rocwmma.hpp, else search the standard install prefixes
-# (also covers rock-dkms/rpm layouts where headers live under /usr and /usr/share
-# does not carry rocwmma.hpp - users may point LLAMA_ROCWMMA_HPP at the file).
-ifdef LLAMA_ROCWMMA_HPP
-DETECT_ROCWMMA := $(LLAMA_ROCWMMA_HPP)
-else
-DETECT_ROCWMMA := \
-	$(firstword \
-		$(shell find -L /opt/rocm/include /usr/include /usr/local/include \
-			-type f -name rocwmma.hpp 2>/dev/null | head -n 1) \
-	)
-endif
-ifdef DETECT_ROCWMMA
-HIPFLAGS   += -DGGML_HIP_ROCWMMA_FATTN -I$(dir $(DETECT_ROCWMMA))
-else
-HIPFLAGS   += -DGGML_HIP_NO_ROCWMMA_FATTN
-endif
-endif
-
 # hipBLASLt: opt-in GEMM backend. Only useful on CDNA/consumer GPUs where hipBLASLt
 # beats classic hipBLAS for the LLM-sized batched GEMMs. Harmless if absent.
 ifdef LLAMA_HIPBLASLT
@@ -330,7 +303,22 @@ HIPFLAGS   += -DGGML_USE_HIPBLASLT
 HIPLDFLAGS += -lhipblaslt
 endif
 
-HIPFLAGS   += -DGGML_USE_HIP -DGGML_HIP_NO_VMM -DGGML_USE_CUDA $(shell $(if $(shell which hipconfig 2>/dev/null),hipconfig,$(ROCM_PATH)/bin/hipconfig) -C 2>/dev/null)
+# HIP graphs reduce launch overhead after graph capture. Set LLAMA_HIP_GRAPHS=0 to
+# disable them when investigating a ROCm runtime issue.
+LLAMA_HIP_GRAPHS ?= 1
+ifeq ($(LLAMA_HIP_GRAPHS),1)
+HIPFLAGS   += -DGGML_HIP_GRAPHS
+endif
+
+# HIP VMM remains opt-in: it has had runtime-specific instability. Enable it only
+# after validating the installed ROCm release with LLAMA_HIP_VMM=1.
+ifeq ($(LLAMA_HIP_VMM),1)
+HIP_VMM_FLAG :=
+else
+HIP_VMM_FLAG := -DGGML_HIP_NO_VMM
+endif
+
+HIPFLAGS   += -DGGML_USE_HIP $(HIP_VMM_FLAG) -DGGML_USE_CUDA $(shell $(if $(shell which hipconfig 2>/dev/null),hipconfig,$(ROCM_PATH)/bin/hipconfig) -C 2>/dev/null)
 HIPLDFLAGS    += -L$(ROCM_LIBDIR) -Wl,-rpath=$(ROCM_LIBDIR)
 HIPLDFLAGS    += -lhipblas -lamdhip64 -lrocblas
 HIP_OBJS      += ggml-cuda.o ggml_v3-cuda.o ggml_v2-cuda.o ggml_v2-cuda-legacy.o

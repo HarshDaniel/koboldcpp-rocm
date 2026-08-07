@@ -49,6 +49,7 @@ set(LLAMA_CUDA_PEER_MAX_BATCH_SIZE "128" CACHE STRING
 
 option(LLAMA_HIPBLAS                         "llama: use hipBLAS"                               ON)
 option(GGML_HIP_NO_VMM                      "ggml: do not try to use HIP VMM"                 ON)
+option(GGML_HIP_GRAPHS                      "ggml: use HIP graphs to reduce launch overhead"  ON)
 # Other
 option(LLAMA_OPENMP                          "llama: use OpenMP"                                OFF)
 
@@ -71,10 +72,6 @@ add_compile_definitions(GGML_USE_CPU_REPACK)
 add_compile_definitions(GGML_USE_RPC)
 add_compile_definitions(NOMINMAX)
 add_compile_definitions(_REGEX_MAX_STACK_COUNT=5000)
-
-if (GGML_HIP_FORCE_ROCWMMA_FATTN_GFX12)
-    add_compile_definitions(GGML_HIP_ROCWMMA_FATTN_GFX12)
-endif()
 
 if (MSVC)
     add_compile_options("$<$<COMPILE_LANGUAGE:C>:/utf-8>")
@@ -203,7 +200,7 @@ if (LLAMA_HIPBLAS)
         list(APPEND GGML_SOURCES_CUDA ${SRCS})
         file(GLOB SRCS "ggml/src/ggml-cuda/template-instances/mmf*.cu")
         list(APPEND GGML_SOURCES_CUDA ${SRCS})
-        add_compile_definitions(GGML_USE_HIP GGML_USE_CUDA SD_USE_CUDA GGML_HIP_NO_VMM)
+        add_compile_definitions(GGML_USE_HIP GGML_USE_CUDA SD_USE_CUDA)
 
         list(APPEND GGML_SOURCES_ROCM
             ggml/src/ggml-cuda/template-instances/fattn-vec-instance-f16-f16.cu
@@ -215,6 +212,9 @@ if (LLAMA_HIPBLAS)
 
         if (GGML_HIP_NO_VMM)
             add_compile_definitions(GGML_HIP_NO_VMM)
+        endif()
+        if (GGML_HIP_GRAPHS)
+            add_compile_definitions(GGML_HIP_GRAPHS)
         endif()
                 
         add_compile_definitions(GGML_USE_HIPBLAS GGML_USE_HIP GGML_USE_CUDA SD_USE_CUBLAS)
