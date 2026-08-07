@@ -486,6 +486,15 @@ class DeepseekV4Model(TextModel):
         for key, value in raw_hparams.items():
             self.hparams.setdefault(key, value)
 
+        # Transformers 5.x stores the DeepSeek V4 RoPE settings under the
+        # special full_attention/compress layout.  Retain the original
+        # rope_scaling metadata so conversion receives a usable rope_type.
+        if self.rope_parameters.get("full_attention", self.rope_parameters).get("rope_type") is None:
+            if (rope_scaling := raw_hparams.get("rope_scaling")) is not None:
+                if "rope_type" not in rope_scaling and (rope_type := rope_scaling.get("type")) is not None:
+                    rope_scaling["rope_type"] = rope_type
+                self.rope_parameters.update(**rope_scaling)
+
         self.block_count = self.hparams["num_hidden_layers"]
         self.tensor_map = gguf.get_tensor_name_map(self.model_arch, self.block_count)
 
